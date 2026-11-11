@@ -2,15 +2,10 @@
 
 import math
 
-import matplotlib.pyplot as plt
+import altair as alt
 import pandas as pd
 import streamlit as st
 
-from b_visualizations import (
-    charging_energy_figure,
-    cost_figure,
-    temperature_figure,
-)
 from dashboard_data import (
     CRITICAL_MARGIN,
     DEFAULT_TEMP,
@@ -23,7 +18,7 @@ from dashboard_data import (
     prepare_sessions,
     sales_in_range,
 )
-from pipeline import CHARGER_RATES, CLEANED, ROOT
+from pipeline import CHARGER_RATES, CLEANED, ROOT, USERS
 
 
 SALES = ROOT / "sales_data.csv"
@@ -35,19 +30,64 @@ def load_sessions(path, modified_ns):
     return prepare_sessions(pd.read_csv(path))
 
 
-
 @st.cache_data
 def load_sales(path, modified_ns):
     """Load the dated transaction file and invalidate the cache on edits."""
     return prepare_sales(pd.read_csv(path))
 
 
-def display_chart(figure):
-    """Render and close one figure on every dashboard rerun."""
-    try:
-        st.pyplot(figure, use_container_width=True)
-    finally:
-        plt.close(figure)
+def show_charging_charts(sessions):
+    """Render the filtered overview charts using Streamlit's Altair backend."""
+    hourly = (
+        sessions.groupby("Start_Hour")["Energy_kWh"].sum()
+        .reindex(range(24), fill_value=0)
+        .rename_axis("Start_Hour").reset_index()
+    )
+    energy_chart = alt.Chart(hourly).mark_line(point=True).encode(
+        x=alt.X("Start_Hour:Q", title="Recorded start hour"),
+        y=alt.Y("Energy_kWh:Q", title="Total delivered energy (kWh)"),
+        tooltip=[
+            alt.Tooltip("Start_Hour:Q", title="Start hour"),
+            alt.Tooltip("Energy_kWh:Q", title="Energy (kWh)", format=",.2f"),
+        ],
+    )
+
+    cost_chart = alt.Chart(sessions).mark_boxplot(extent=1.5).encode(
+        x=alt.X("User_Type:N", sort=list(USERS), title="User type"),
+        y=alt.Y("Net_Billable_MYR:Q", title="Net billed amount (MYR)"),
+    )
+
+    temp = alt.X(
+        "Battery_Temp_C:Q", title="Battery temperature (°C)",
+        scale=alt.Scale(zero=False),
+    )
+    energy = alt.Y("Energy_kWh:Q", title="Energy delivered (kWh)")
+    charger = alt.Color("Charger_Type:N", title="Charger type")
+    dots = alt.Chart(sessions).mark_circle(opacity=0.35, size=25).encode(
+        x=temp, y=energy, color=charger,
+        tooltip=[
+            "Charger_Type:N",
+            alt.Tooltip("Battery_Temp_C:Q", format=".1f"),
+            alt.Tooltip("Energy_kWh:Q", format=".2f"),
+        ],
+    )
+    # A linear fit needs at least two distinct temperatures per charger type.
+    distinct = sessions.groupby("Charger_Type")["Battery_Temp_C"].nunique()
+    fit = sessions.loc[sessions["Charger_Type"].isin(distinct[distinct >= 2].index)]
+    temperature_chart = dots
+    if not fit.empty:
+        lines = alt.Chart(fit).transform_regression(
+            "Battery_Temp_C", "Energy_kWh", groupby=["Charger_Type"],
+        ).mark_line(strokeWidth=2.5).encode(x=temp, y=energy, color=charger)
+        temperature_chart = dots + lines
+
+    st.subheader("Charging energy by start hour")
+    st.caption("Each session contributes its total kWh to its start-hour group.")
+    st.altair_chart(energy_chart.properties(height=290), use_container_width=True)
+    st.subheader("Charging cost by user")
+    st.altair_chart(cost_chart.properties(height=290), use_container_width=True)
+    st.subheader("Battery temperature and energy delivered")
+    st.altair_chart(temperature_chart.properties(height=310), use_container_width=True)
 
 
 def show_overview(data, filtered, threshold):
@@ -77,13 +117,7 @@ def show_overview(data, filtered, threshold):
         st.info("No charging sessions match these filters.")
         return
 
-    st.subheader("Charging energy by start hour")
-    st.caption("Each session contributes its total kWh to its start-hour group.")
-    display_chart(charging_energy_figure(filtered))
-    st.subheader("Charging cost by user")
-    display_chart(cost_figure(filtered))
-    st.subheader("Battery temperature and energy delivered")
-    display_chart(temperature_figure(filtered))
+    show_charging_charts(filtered)
 
 
 def show_alerts(filtered, threshold):
@@ -117,7 +151,6 @@ def show_alerts(filtered, threshold):
         file_name="filtered_charging_sessions.csv", mime="text/csv",
         on_click="ignore",
     )
-
 
 
 def show_sales():
